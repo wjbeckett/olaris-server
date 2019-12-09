@@ -1,7 +1,7 @@
 version: "1"
 rules:
   - base: master
-    upstream: olarisTV/olaris-server:master
+    upstream: OlarisTV:master
     mergeMethod: hardreset
 #  - base: develop
 #    upstream: olarisTV/olaris-server:develop
