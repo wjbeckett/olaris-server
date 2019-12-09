@@ -3,6 +3,6 @@ rules:
   - base: master
     upstream: OlarisTV:master
     mergeMethod: hardreset
-#  - base: develop
-#    upstream: olarisTV/olaris-server:develop
+  - base: develop
+    upstream: OlarisTV:develop
 label: ":arrow_heading_down: pull"
