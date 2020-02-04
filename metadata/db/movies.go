@@ -273,15 +273,14 @@ func CreateMovie(movie *Movie) {
 }
 
 // SaveMovie updates a movie in the database.
-func SaveMovie(movie *Movie) {
+func SaveMovie(movie *Movie) error {
 	//TODO: This is persisting everything including files and streams, perhaps we can do it more selectively to lower db activity.
-	db.Save(movie)
+	return db.Save(movie).Error
 }
 
-// DeleteMovie deletes the movie from the database
-func DeleteMovie(movie *Movie) {
-	//TODO: This is persisting everything including files and streams, perhaps we can do it more selectively to lower db activity.
-	db.Delete(movie)
+// DeleteMovieByID deletes the movie from the database
+func DeleteMovieByID(movieID uint) {
+	db.Delete(Movie{}, "id = ?", movieID)
 }
 
 // SaveMovieFile saves a MovieFile
