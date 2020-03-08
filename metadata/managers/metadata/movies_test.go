@@ -10,8 +10,7 @@ import (
 
 func TestGetOrCreateMovieForMovieFile_SearchByStringDistance(t *testing.T) {
 	// TODO(Leon Handreke): Dependency inject instead of relying on global singletons
-	db.NewDb(db.InMemory, false)
-
+	db.NewInMemoryDBForTests(false)
 	agent := agentsfakes.FakeMetadataRetrievalAgent{}
 	m := MetadataManager{
 		agent: &agent,
@@ -19,7 +18,8 @@ func TestGetOrCreateMovieForMovieFile_SearchByStringDistance(t *testing.T) {
 
 	movieFile := db.MovieFile{
 		MediaItem: db.MediaItem{
-			FileName: "The Walking Dead S01E01.mkv",
+			FileName: "The Walking Dead.mkv",
+			FilePath: "local#/The Walking Dead.mkv",
 		},
 	}
 	// This is what TMDB really does and why we have the string distance search feature

@@ -26,7 +26,10 @@ func createMovieData() {
 }
 
 func setupTest(t *testing.T) func() {
-	dbc := db.NewDb(db.InMemory, false)
+	dbc := db.NewDb(db.DatabaseOptions{
+		Connection: db.InMemory,
+		LogMode:    false,
+	})
 
 	// Test teardown - return a closure for use by 'defer'
 	return func() {

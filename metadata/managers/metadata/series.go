@@ -1,9 +1,10 @@
 package metadata
 
 import (
-	"fmt"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"gitlab.com/olaris/olaris-server/filesystem"
+	"gitlab.com/olaris/olaris-server/helpers"
 	"gitlab.com/olaris/olaris-server/helpers/levenshtein"
 	"gitlab.com/olaris/olaris-server/metadata/db"
 	"gitlab.com/olaris/olaris-server/metadata/parsers"
@@ -12,6 +13,16 @@ import (
 	"strings"
 	"sync"
 )
+
+type TmdbEpisodeKey struct {
+	TmdbSeriesID  int
+	SeasonNumber  int
+	EpisodeNumber int
+}
+
+const xattrNameTVSeriesTMDBID = "user.olaris.v1.tv.tmdb.series.id"
+const xattrNameTVSeasonNumber = "user.olaris.v1.tv.tmdb.season.number"
+const xattrNameTVEpisodeNumber = "user.olaris.v1.tv.tmdb.episode.number"
 
 func (m *MetadataManager) getEpisodeLock(episodeID uint) *sync.RWMutex {
 	v, _ := m.episodeLock.LoadOrStore(episodeID, &sync.RWMutex{})
@@ -83,23 +94,13 @@ func (m *MetadataManager) UpdateSeasonMD(season *db.Season) error {
 	return nil
 }
 
-// GetOrCreateEpisodeForEpisodeFile tries to create an Episode object by parsing the filename of the
-// given EpisodeFile and looking it up in TMDB. It associates the EpisodeFile with the new Model.
-// If no matching episode can be found in TMDB, it returns an error.
-func (m *MetadataManager) GetOrCreateEpisodeForEpisodeFile(
-	episodeFile *db.EpisodeFile) (*db.Episode, error) {
-
-	if episodeFile.EpisodeID != 0 {
-		return db.FindEpisodeByID(episodeFile.EpisodeID)
-	}
+// Attempt to parse a filename and determine the three values
+// that uniquely identify the episode (on TMDB)
+func (m *MetadataManager) getEpisodeKeyFromFilename(
+	episodeFile *db.EpisodeFile) (*TmdbEpisodeKey, error) {
 
 	name := strings.TrimSuffix(episodeFile.FilePath, filepath.Ext(episodeFile.FileName))
-	parsedInfo := parsers.ParseSerieName(name)
-
-	if parsedInfo.SeasonNum == 0 || parsedInfo.EpisodeNum == 0 {
-		// We can't do anything if we don't know the season/episode number
-		return nil, fmt.Errorf("Can't parse Season/Episode number from filename %s", name)
-	}
+	parsedInfo := parsers.ParseSeriesName(name)
 
 	// Find a series for this Episode
 	var options = make(map[string]string)
@@ -131,8 +132,69 @@ func (m *MetadataManager) GetOrCreateEpisodeForEpisodeFile(
 	}
 	seriesInfo := searchRes.Results[bestResultIdx]
 
+	return &TmdbEpisodeKey{TmdbSeriesID: seriesInfo.ID, SeasonNumber: parsedInfo.SeasonNum, EpisodeNumber: parsedInfo.EpisodeNum}, nil
+
+}
+
+// Attempt to read the season/episode information from the file's xattrs
+// The bool return value indicates whether xattr information was present on the file
+func (m *MetadataManager) getEpisodeKeyFromXattr(
+	episodeFile *db.EpisodeFile) (*TmdbEpisodeKey, bool, error) {
+
+	p, err := filesystem.ParseFileLocator(episodeFile.GetFilePath())
+	if err != nil {
+		return nil, false, err
+	}
+
+	xattrNames := []string{xattrNameTVSeriesTMDBID, xattrNameTVSeasonNumber, xattrNameTVEpisodeNumber}
+	xattrTmdbIDs, err := helpers.GetXattrInts(p.Path, xattrNames)
+	if err != nil {
+		log.Debugln("No Xattr data found for ", p.Path, err)
+		return &TmdbEpisodeKey{}, false, nil
+	}
+
+	return &TmdbEpisodeKey{
+		TmdbSeriesID:  xattrTmdbIDs[xattrNameTVSeriesTMDBID],
+		SeasonNumber:  xattrTmdbIDs[xattrNameTVSeasonNumber],
+		EpisodeNumber: xattrTmdbIDs[xattrNameTVEpisodeNumber],
+	}, true, nil
+}
+
+func (m *MetadataManager) getEpisodeKey(episodeFile *db.EpisodeFile) (*TmdbEpisodeKey, error) {
+	episodeKey, xattrInfoFound, err := m.getEpisodeKeyFromXattr(episodeFile)
+	if err != nil {
+		return nil, err
+	}
+	if xattrInfoFound {
+		log.Debugln(
+			"read xattr for TMDB series ID", episodeKey.TmdbSeriesID,
+			"season", episodeKey.SeasonNumber,
+			"episode", episodeKey.EpisodeNumber,
+			"from filename", episodeFile.FileName)
+		return episodeKey, nil
+	}
+
+	return m.getEpisodeKeyFromFilename(episodeFile)
+}
+
+// GetOrCreateEpisodeForEpisodeFile tries to create an Episode object by parsing the filename of the
+// given EpisodeFile and looking it up in TMDB. It associates the EpisodeFile with the new Model.
+// If no matching episode can be found in TMDB, it returns an error.
+func (m *MetadataManager) GetOrCreateEpisodeForEpisodeFile(
+	episodeFile *db.EpisodeFile) (*db.Episode, error) {
+
+	if episodeFile.EpisodeID != 0 {
+		return db.FindEpisodeByID(episodeFile.EpisodeID)
+	}
+
+	episodeKey, err := m.getEpisodeKey(episodeFile)
+	if err != nil {
+		return nil, errors.Wrapf(err,
+			"Failed to get episode key from file %s", episodeFile.FilePath)
+	}
+
 	episode, err := m.GetOrCreateEpisodeByTmdbID(
-		seriesInfo.ID, parsedInfo.SeasonNum, parsedInfo.EpisodeNum)
+		episodeKey.TmdbSeriesID, episodeKey.SeasonNumber, episodeKey.EpisodeNumber)
 	if err != nil {
 		return nil, err
 	}
