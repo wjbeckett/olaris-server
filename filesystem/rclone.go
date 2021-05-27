@@ -2,13 +2,15 @@ package filesystem
 
 import (
 	"fmt"
-	_ "github.com/ncw/rclone/backend/all"
-	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/vfs"
 	"github.com/pkg/errors"
+	_ "github.com/rclone/rclone/backend/all"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/vfs"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	log "github.com/sirupsen/logrus"
 	"path"
 	"strings"
+	"sync"
 )
 
 type rclonePath struct {
@@ -37,6 +39,9 @@ type RcloneNode struct {
 }
 
 var vfsCache = map[string]*vfs.VFS{}
+var vfsCacheLock sync.Mutex
+
+var newFsFunc func(string) (fs.Fs, error) = fs.NewFs
 
 func RcloneNodeFromPath(pathStr string) (*RcloneNode, error) {
 	l, err := splitRclonePath(pathStr)
@@ -44,15 +49,19 @@ func RcloneNodeFromPath(pathStr string) (*RcloneNode, error) {
 		return nil, err
 	}
 
+	vfsCacheLock.Lock()
+	defer vfsCacheLock.Unlock()
+
 	if _, inCache := vfsCache[l.remoteName]; !inCache {
 		log.WithFields(log.Fields{"remoteName": l.remoteName}).Debugln("Creating Rclone VFS")
-		filesystem, err := fs.NewFs(l.remoteName + ":/")
+		fmt.Println("Got remote:", l.remoteName)
+		filesystem, err := newFsFunc(l.remoteName + ":/")
 		if err != nil {
 			return nil, errors.Wrap(err, "Failed to create rclone Fs")
 		}
 		// Ensuring the latest default options modified for our usecase is probably safer
-		opts := vfs.DefaultOpt
-		opts.CacheMode = vfs.CacheModeMinimal
+		opts := vfscommon.DefaultOpt
+		opts.CacheMode = vfscommon.CacheModeMinimal
 		opts.ChunkSize = 32 * fs.MebiByte
 
 		vfsCache[l.remoteName] = vfs.New(filesystem, &opts)
@@ -79,6 +88,23 @@ func (n *RcloneNode) Size() int64 {
 
 func (n *RcloneNode) IsDir() bool {
 	return n.Node.IsDir()
+}
+func (n *RcloneNode) ListDir() ([]string, error) {
+	dirs := []string{}
+	if n.IsDir() {
+		i := n.Node.(*vfs.Dir)
+		nodes, err := i.ReadDirAll()
+		if err != nil {
+			return dirs, err
+		}
+		for _, file := range nodes {
+			if file.IsDir() {
+				dirs = append(dirs, file.Name())
+			}
+		}
+		return dirs, nil
+	}
+	return []string{}, nil
 }
 
 func (n *RcloneNode) BackendType() BackendType {

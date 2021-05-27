@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := build-local
 
-GOCMD=GO111MODULE=on GOFLAGS="-mod=vendor" go
+GOCMD=GO111MODULE=on GOFLAGS= go
 GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOFMT=$(GOCMD) fmt
@@ -16,7 +16,6 @@ BINARY_NAME=olaris
 CMD_SERVER_PATH=main.go
 REACT_REPO=https://gitlab.com/olaris/olaris-react.git
 SRC_PATH=gitlab.com/olaris/olaris-server
-GIT_REV := $(shell git rev-list -1 HEAD)
 REACT_BUILD_DIR=./app/build
 IDENTIFIER=$(BINARY_NAME)-$(GOOS)-$(GOARCH)
 RELEASE_IDENTIFIER=$(shell git describe --tags)
@@ -25,7 +24,7 @@ LDFLAGS=-ldflags "-X $(SRC_PATH)/helpers.Version=$(RELEASE_IDENTIFIER)"
 all: generate
 
 .PHONY: ready-ci
-ready-ci: deps download-olaris-react download-ffmpeg generate
+ready-ci: download-olaris-react download-ffmpeg generate
 
 .PHONY: download-ffmpeg
 download-ffmpeg:
@@ -67,6 +66,12 @@ docker-push:
 	docker push olaristv/olaris-server:latest
 	docker push olaristv/olaris-server:$(RELEASE_IDENTIFIER)
 
+docker-from-ci-build-tag-push:
+	docker build -f Dockerfile.from-ci . -t olaristv/olaris-server:from-ci
+	docker tag olaristv/olaris-server:from-ci olaristv/olaris-server:from-ci-$(RELEASE_IDENTIFIER)
+	docker push olaristv/olaris-server:from-ci
+	docker push olaristv/olaris-server:from-ci-$(RELEASE_IDENTIFIER)
+
 .PHONY: crossbuild
 crossbuild:
 	mkdir -p $(BIN_LOC)
@@ -105,11 +110,6 @@ vet:
 clean:
 	$(GOCLEAN)
 	rm -rf ./builds
-
-.PHONY: deps
-deps:
-	$(GOGET) github.com/go-bindata/go-bindata/...
-	$(GOGET) github.com/elazarl/go-bindata-assetfs/...
 
 .PHONY: generate
 generate:

@@ -2,20 +2,36 @@ package streaming
 
 import (
 	"fmt"
-	"github.com/google/uuid"
-	"gitlab.com/olaris/olaris-server/ffmpeg"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
+
+	"gitlab.com/olaris/olaris-server/ffmpeg"
 )
 
 const playbackSessionTimeout = 20 * time.Minute
 
 const InitSegmentIdx = -1
 
-// TODO(Leon Handreke): Figure out a better way than a package-global variable to
-// convey this info from the top-level command flag to ffmpeg. Or maybe a setter is enough?
-// Also this should go in some util package to build URLs
-var FfmpegUrlPort = 8080
+var PBSManager, _ = NewPlaybackSessionManager()
+
+func NewPlaybackSessionManager() (m *PlaybackSessionManager, cleanup func()) {
+	m = &PlaybackSessionManager{
+		mtx:      sync.Mutex{},
+		sessions: make(map[PlaybackSessionKey]*PlaybackSession),
+	}
+
+	return m, m.CleanupSessions
+}
+
+type PlaybackSessionManager struct {
+	// Read-modify-write mutex for sessions. This ensures that two parallel requests don't both create a session.
+	mtx      sync.Mutex
+	sessions map[PlaybackSessionKey]*PlaybackSession
+}
 
 type PlaybackSessionKey struct {
 	ffmpeg.StreamKey
@@ -54,12 +70,7 @@ type PlaybackSession struct {
 	lastAccessed time.Time
 }
 
-// Read-modify-write mutex for sessions. This ensures that two parallel requests don't both create a session.
-var sessionsMutex = sync.Mutex{}
-
-var playbackSessions = map[PlaybackSessionKey]*PlaybackSession{}
-
-func NewPlaybackSession(playbackSessionKey PlaybackSessionKey, segmentIdx int) (*PlaybackSession, error) {
+func NewPlaybackSession(playbackSessionKey PlaybackSessionKey, segmentIdx int, m *PlaybackSessionManager) (*PlaybackSession, error) {
 	stream, err := ffmpeg.GetStream(playbackSessionKey.StreamKey)
 	if err != nil {
 		return nil, err
@@ -71,7 +82,7 @@ func NewPlaybackSession(playbackSessionKey PlaybackSessionKey, segmentIdx int) (
 	// TODO(Leon Handreke): Find a better way to build URLs
 
 	feedbackURL := fmt.Sprintf("http://127.0.0.1:%d/olaris/s/ffmpeg/%s/feedback",
-		FfmpegUrlPort, playbackSessionID)
+		viper.GetInt("server.port"), playbackSessionID)
 
 	if err != nil {
 		return nil, fmt.Errorf("Failed to build FFmpeg feedback url: %s", err.Error())
@@ -94,7 +105,7 @@ func NewPlaybackSession(playbackSessionKey PlaybackSessionKey, segmentIdx int) (
 		referenceCount:          1,
 		lastAccessed:            time.Now(),
 	}
-	s.startTimeoutTicker()
+	s.startTimeoutTicker(m)
 
 	return s, nil
 }
@@ -107,14 +118,14 @@ func NewPlaybackSession(playbackSessionKey PlaybackSessionKey, segmentIdx int) (
 // it doesn't matter where ffmpeg seeked to, the init segment will
 // always be the same.
 // The returned PlaybackSession must be released after use by calling ReleasePlaybackSession.
-func GetPlaybackSession(
+func (m *PlaybackSessionManager) GetPlaybackSession(
 	playbackSessionKey PlaybackSessionKey,
 	segmentIdx int) (*PlaybackSession, error) {
 
-	sessionsMutex.Lock()
-	defer sessionsMutex.Unlock()
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
 
-	s := playbackSessions[playbackSessionKey]
+	s := m.sessions[playbackSessionKey]
 
 	// If requesting the init segment, it doesn't matter where the existing session started,
 	// we can just deliver it directly. Init segments are always the same, regardless of the
@@ -155,19 +166,19 @@ func GetPlaybackSession(
 		startAtSegmentIdx = segmentIdx
 	}
 
-	s, err := NewPlaybackSession(playbackSessionKey, startAtSegmentIdx)
+	s, err := NewPlaybackSession(playbackSessionKey, startAtSegmentIdx, m)
 	if err != nil {
 		return nil, err
 	}
 
-	playbackSessions[playbackSessionKey] = s
+	m.sessions[playbackSessionKey] = s
 
 	s.referenceCount++
-	go garbageCollectPlaybackSessions()
+	go m.garbageCollectPlaybackSessions()
 	return s, nil
 }
 
-func garbageCollectPlaybackSessions() {
+func (m *PlaybackSessionManager) garbageCollectPlaybackSessions() {
 	// Clean up streams after a user has switched representation or after they hhave started a
 	// new playback session for the same stream (e.g. by reloading the page)
 	type uniqueKey struct {
@@ -175,7 +186,7 @@ func garbageCollectPlaybackSessions() {
 		userID uint
 	}
 	playbackSessionsByUniqueKey := make(map[uniqueKey][]*PlaybackSession)
-	for _, s := range playbackSessions {
+	for _, s := range m.sessions {
 		k := uniqueKey{s.StreamKey, s.userID}
 		playbackSessionsByUniqueKey[k] = append(playbackSessionsByUniqueKey[k], s)
 	}
@@ -191,7 +202,7 @@ func garbageCollectPlaybackSessions() {
 			}
 			for _, s := range sessions {
 				if s != newestSession {
-					removePlaybackSession(s)
+					m.removePlaybackSession(s)
 				}
 			}
 		}
@@ -201,13 +212,13 @@ func garbageCollectPlaybackSessions() {
 // GetPlaybackSessionByID gets the playback session by its ID. If one with the given ID does not exist,
 // and error is returned.
 // The returned PlaybackSession must be released after use by calling ReleasePlaybackSession.
-func GetPlaybackSessionByID(playbackSessionID string) (*PlaybackSession, error) {
-	sessionsMutex.Lock()
-	defer sessionsMutex.Unlock()
+func (m *PlaybackSessionManager) GetPlaybackSessionByID(playbackSessionID string) (*PlaybackSession, error) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
 
 	var s *PlaybackSession
 
-	for _, v := range playbackSessions {
+	for _, v := range m.sessions {
 		if v.playbackSessionID == playbackSessionID {
 			s = v
 			break
@@ -222,11 +233,13 @@ func GetPlaybackSessionByID(playbackSessionID string) (*PlaybackSession, error) 
 	return s, nil
 }
 
-func removePlaybackSession(s *PlaybackSession) {
-	sessionsMutex.Lock()
-	defer sessionsMutex.Unlock()
+func (m *PlaybackSessionManager) removePlaybackSession(s *PlaybackSession) {
+	log.WithFields(log.Fields{"file": s.PlaybackSessionKey.FileLocator, "representationID": s.PlaybackSessionKey.representationID, "sessionID": s.playbackSessionID}).Debugln("removing playback session")
 
-	delete(playbackSessions, s.PlaybackSessionKey)
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	delete(m.sessions, s.PlaybackSessionKey)
 	s.Release()
 }
 
@@ -240,7 +253,10 @@ func (s *PlaybackSession) CleanupIfRequired() {
 		return
 	}
 
-	s.TranscodingSession.Destroy()
+	err := s.TranscodingSession.Destroy()
+	if err != nil {
+		log.WithField("error", err).Warnln("received an error while cleaning up transcoding folder")
+	}
 }
 
 // shouldThrottle returns whether the transcoding process is far enough ahead of the current
@@ -249,7 +265,7 @@ func (s *PlaybackSession) shouldThrottle() bool {
 	segments, _ := s.TranscodingSession.AvailableSegments()
 
 	maxSegmentIdx := -1
-	for segmentIdx, _ := range segments {
+	for segmentIdx := range segments {
 		if segmentIdx > maxSegmentIdx {
 			maxSegmentIdx = segmentIdx
 		}
@@ -257,16 +273,18 @@ func (s *PlaybackSession) shouldThrottle() bool {
 	return maxSegmentIdx >= (s.lastServedSegmentIdx + 10)
 }
 
+// TODO: We should probably close this as soon as the stream stops just to clean up after ourselves
 // startTimeoutTicker starts a timer that will destroy the session if it has not been
 // accessed for playbackSessionTimeout. This ensures that no ffmpeg processes linger around.
-func (s *PlaybackSession) startTimeoutTicker() {
+func (s *PlaybackSession) startTimeoutTicker(m *PlaybackSessionManager) {
 	ticker := time.NewTicker(10 * time.Second)
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
+				//log.WithFields(log.Fields{"accessTime": s.lastAccessed, "sessionID": s.sessionID, "path": s.FileLocator, "representationID": s.representationID}).Debugln("checking access timer for ffmpeg", s.lastAccessed)
 				if time.Since(s.lastAccessed) > playbackSessionTimeout {
-					removePlaybackSession(s)
+					m.removePlaybackSession(s)
 
 					ticker.Stop()
 					return
@@ -274,4 +292,33 @@ func (s *PlaybackSession) startTimeoutTicker() {
 			}
 		}
 	}()
+}
+
+// Cleanup cleans up any streaming artifacts that might be left.
+func (m *PlaybackSessionManager) CleanupSessions() {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	for _, s := range m.sessions {
+		s.referenceCount--
+		s.CleanupIfRequired()
+
+		if s.referenceCount > 0 {
+			log.Warn("Playback session reference count leak: ", s.TranscodingSession)
+		}
+	}
+	log.Println("Cleaned up all streaming context")
+}
+
+func (m *PlaybackSessionManager) GetPlaybackSessions() map[PlaybackSessionKey]*PlaybackSession {
+	m.mtx.Lock()
+
+	c := make(map[PlaybackSessionKey]*PlaybackSession)
+	for key, session := range m.sessions {
+		c[key] = session
+	}
+
+	m.mtx.Unlock()
+
+	return c
 }

@@ -33,7 +33,7 @@ const transcodingSessionsDebugPageTemplate = `
 			{{ range .sessions }}
 				<tr>
 					{{ with .TranscodingSession }}
-					<td>{{ .Stream.Stream.MediaFileURL }}:{{ .Stream.Stream.StreamId }} ({{ .Stream.Stream.StreamType }}) </td>
+					<td>{{ .Stream.Stream.FileLocator }}:{{ .Stream.Stream.StreamId }} ({{ .Stream.Stream.StreamType }}) </td>
 					<td style="width: 200px;">{{ .Stream.Representation.RepresentationId }}</td>
 					<td>{{ .OutputDir }}</td>
 					<td>{{if .Terminated }}
@@ -57,6 +57,7 @@ func servePlaybackSessionDebugPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var transcodingSessions []*ffmpeg.TranscodingSession
+	var playbackSessions = PBSManager.GetPlaybackSessions()
 
 	for _, s := range playbackSessions {
 		transcodingSessions = append(transcodingSessions, s.TranscodingSession)

@@ -34,7 +34,7 @@ func serveInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	playbackSession, err := GetPlaybackSession(
+	playbackSession, err := PBSManager.GetPlaybackSession(
 		PlaybackSessionKey{
 			StreamKey:        streamKey,
 			sessionID:        sessionID,
@@ -91,7 +91,7 @@ func serveSegment(w http.ResponseWriter, r *http.Request, mimeType string) {
 		return
 	}
 
-	playbackSession, err := GetPlaybackSession(
+	playbackSession, err := PBSManager.GetPlaybackSession(
 		PlaybackSessionKey{
 			streamKey,
 			sessionID,
@@ -99,14 +99,16 @@ func serveSegment(w http.ResponseWriter, r *http.Request, mimeType string) {
 			claims.UserID,
 		},
 		segmentIdx)
-	playbackSession.Release()
+	defer playbackSession.Release()
 
 	for {
 		availableSegments, err := playbackSession.TranscodingSession.AvailableSegments()
+
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		segmentIdxToServe := playbackSession.lastServedSegmentIdx + 1
 		if segmentPath, ok := availableSegments[segmentIdxToServe]; ok {
 			log.Info("Serving path ", segmentPath, " with MIME type ", mimeType)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	"gitlab.com/olaris/olaris-server/helpers"
 	"io"
 	"io/ioutil"
@@ -21,7 +22,7 @@ type ImageManager struct {
 
 // NewImageManager creates a new instance of a image caching server for themoviedb.
 func NewImageManager() *ImageManager {
-	cachePath := path.Join(helpers.CacheDir(), "images")
+	cachePath := path.Join(viper.GetString("server.cacheDir"), "images")
 	helpers.EnsurePath(cachePath)
 	return &ImageManager{cachePath: cachePath}
 }
@@ -33,6 +34,7 @@ func (man *ImageManager) HTTPHandler(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	folderPath := path.Join(man.cachePath, provider, size)
 	filePath := path.Join(folderPath, id)
+
 	if helpers.FileExists(filePath) {
 		log.WithFields(log.Fields{"file": filePath}).Debugln("Requested file already in cache.")
 		file, err := ioutil.ReadFile(filePath)
@@ -44,14 +46,6 @@ func (man *ImageManager) HTTPHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.WithFields(log.Fields{"file": filePath}).Debugln("Requested file not in cache yet.")
 
-		helpers.EnsurePath(folderPath)
-		openFile, err := os.Create(filePath)
-		if err != nil {
-			log.Warnf("Error while creating file '%s': %s", filePath, err)
-			return
-		}
-		defer openFile.Close()
-
 		url := fmt.Sprintf("http://image.tmdb.org/t/p/%s/%s", size, id)
 		response, err := http.Get(url)
 		if err != nil {
@@ -59,6 +53,14 @@ func (man *ImageManager) HTTPHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer response.Body.Close()
+
+		helpers.EnsurePath(folderPath)
+		openFile, err := os.Create(filePath)
+		if err != nil {
+			log.Warnf("Error while creating file '%s': %s", filePath, err)
+			return
+		}
+		defer openFile.Close()
 
 		var b bytes.Buffer
 		_, err = io.Copy(&b, response.Body)

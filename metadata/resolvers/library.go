@@ -2,11 +2,13 @@ package resolvers
 
 import (
 	"context"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"gitlab.com/olaris/olaris-server/metadata/db"
 	mhelpers "gitlab.com/olaris/olaris-server/metadata/helpers"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -72,6 +74,14 @@ func (r *LibraryResolver) Movies(ctx context.Context) []*MovieResolver {
 	return mr
 }
 
+// Series return seasons based on episodes in a Library.
+func (r *LibraryResolver) Series() (series []*SeriesResolver) {
+	for _, s := range db.FindSeriesInLibrary(r.r.ID) {
+		series = append(series, &SeriesResolver{r: s})
+	}
+	return series
+}
+
 // Episodes returns episodes in Library.
 func (r *LibraryResolver) Episodes() (eps []*EpisodeResolver) {
 	for _, episode := range db.FindEpisodesInLibrary(r.r.ID) {
@@ -100,10 +110,16 @@ type createLibraryArgs struct {
 }
 
 // RefreshAgentMetadata refreshes all metadata from agent
-func (r *Resolver) RefreshAgentMetadata(args struct {
+func (r *Resolver) RefreshAgentMetadata(ctx context.Context, args struct {
 	LibraryID *int32
 	UUID      *string
 }) bool {
+
+	err := ifAdmin(ctx)
+	if err != nil {
+		return false
+	}
+
 	if args.LibraryID != nil {
 		// TODO(Leon Handreke): Either add a refresh-per-library call to the LibraryManager
 		//  or make this a global update call without a Library ID
@@ -115,9 +131,9 @@ func (r *Resolver) RefreshAgentMetadata(args struct {
 			if lm.Library.ID == libID {
 				go mhelpers.WithLock(func() {
 					if lm.Library.Kind == db.MediaTypeMovie {
-						r.env.MetadataManager.ForceMovieMetadataUpdate()
+						r.env.MetadataManager.RefreshAllMovieMetadata()
 					} else if lm.Library.Kind == db.MediaTypeSeries {
-						r.env.MetadataManager.ForceSeriesMetadataUpdate()
+						r.env.MetadataManager.RefreshAllSeriesMetadata()
 					}
 				}, "libid"+strconv.FormatUint(uint64(lm.Library.ID), 10))
 			}
@@ -132,8 +148,59 @@ func (r *Resolver) RefreshAgentMetadata(args struct {
 	return false
 }
 
+// RescanLibrary can scan (parts) of a Library
+func (r *Resolver) RescanLibrary(ctx context.Context, args struct {
+	ID       *int32
+	FilePath *string
+}) bool {
+	err := ifAdmin(ctx)
+	if err != nil {
+		return false
+	}
+
+	// No specific library is given
+	if args.ID == nil {
+		if args.FilePath == nil {
+			return false
+		}
+
+		// A valid filepath has been given so let's look in all libraries for the given path
+		validLibFound := false
+		for _, man := range r.libs {
+			if strings.Contains(*args.FilePath, man.Library.FilePath) {
+				validLibFound = true
+				go mhelpers.WithLock(func() {
+					man.RescanFilesystem(*args.FilePath)
+				}, fmt.Sprintf("refresh-lib-%s", strconv.Itoa(int(man.Library.ID))))
+			}
+		}
+		return validLibFound
+	}
+
+	// A specific library has been given
+	libId := uint(*args.ID)
+	man := r.libs[libId]
+
+	// No specific filepath has been given so we can refresh the whole library.
+	if args.FilePath == nil {
+		go mhelpers.WithLock(func() {
+			man.RefreshAll()
+		}, fmt.Sprintf("refresh-lib-%s", strconv.Itoa(int(man.Library.ID))))
+	} else {
+		go mhelpers.WithLock(func() {
+			man.RescanFilesystem(*args.FilePath)
+		}, fmt.Sprintf("refresh-lib-%s", strconv.Itoa(int(man.Library.ID))))
+	}
+	return true
+}
+
 // RescanLibraries rescans all libraries for new files.
-func (r *Resolver) RescanLibraries() bool {
+func (r *Resolver) RescanLibraries(ctx context.Context) bool {
+	err := ifAdmin(ctx)
+	if err != nil {
+		return false
+	}
+
 	if rescanningLibraries == false {
 		rescanningLibraries = true
 		go func() {
@@ -154,13 +221,19 @@ func (r *Resolver) DeleteLibrary(ctx context.Context, args struct{ ID int32 }) *
 		return &LibResResolv{LibraryResponse{Error: CreateErrResolver(err)}}
 	}
 
-	r.StopLibraryManager(uint(args.ID))
+	libraryManager := r.libs[uint(args.ID)]
+	library := *libraryManager.Library
+	// TODO(Leon Handreke): Ideally, it would be more explicit what is happening here.
+	// We are stopping the watcher to then remove the library manager
+	libraryManager.Shutdown()
+	libraryManager.DeleteLibrary()
 
-	library, err := db.DeleteLibrary(int(args.ID))
 	var libRes LibraryResponse
 	// TODO(Maran): Dry up resolver creation here and in CreateLibrary
 	if err == nil {
-		libRes = LibraryResponse{Library: &LibraryResolver{Library{library, nil, nil}}}
+		// TODO(Leon Handreke): Why are returning a deleted library?
+		libRes = LibraryResponse{Library: &LibraryResolver{
+			Library{library, nil, nil}}}
 	} else {
 		libRes = LibraryResponse{Error: CreateErrResolver(err)}
 	}

@@ -6,10 +6,13 @@ binaries
 bin
 node_modules
 cmd/olaris-server/bsmds-linux
-**/bindata.go
+metadata/resolvers/schematxt.go
 **/*fakes/*
 react/build
 yarn.lock
 build
 dist
 olaris-server
+vendor
+.vscode
+metadata/auth/token.secret

@@ -41,6 +41,8 @@ var humanizedToLangTag = GetHumanizedToLangTag()
 
 func GetHumanizedToLangTag() map[string]string {
 	humanizedToLangTag := reverseMap(langTagToHumanized)
+
+	// Some other tags that sometimes appear in external subtitle filenames
 	humanizedToLangTag["Polski"] = "pol"
 	return humanizedToLangTag
 }
@@ -145,12 +147,11 @@ func getTranscodingLogSink(prefix string) io.WriteCloser {
 
 	filename := fmt.Sprintf("%s_%s.log",
 		prefix, time.Now().UTC().Format(time.RFC3339))
-	filepath := path.Join(helpers.LogPath(), filename)
+	filepath := path.Join(helpers.LogDir(), filename)
 	f, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		log.Fatal("Failed to open log file ", filepath, ": ", err.Error())
 		f, _ = os.OpenFile(os.DevNull, os.O_RDWR, 0600)
 	}
-	fmt.Println(filepath)
 	return f
 }

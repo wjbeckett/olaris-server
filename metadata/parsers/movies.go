@@ -2,11 +2,13 @@
 package parsers
 
 import (
-	log "github.com/sirupsen/logrus"
-	"gitlab.com/olaris/olaris-server/metadata/helpers"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
+	"gitlab.com/olaris/olaris-server/metadata/helpers"
 )
 
 // ParsedMovieInfo holds extracted information from the given filename.
@@ -16,6 +18,7 @@ type ParsedMovieInfo struct {
 }
 
 var movieRe = regexp.MustCompile("(.*)\\((\\d{4})\\)")
+var yearRe = regexp.MustCompile(`[^\d]?(\d{4})[^\d]?`)
 
 // ParseMovieName attempts to parse a filename looking for movie information.
 func ParseMovieName(fileName string) *ParsedMovieInfo {
@@ -23,6 +26,15 @@ func ParseMovieName(fileName string) *ParsedMovieInfo {
 	psi := ParsedMovieInfo{}
 	var err error
 	var year string
+	fileName = strings.TrimSuffix(fileName, filepath.Ext(fileName))
+
+	nyear := yearRe.FindStringSubmatch(fileName)
+
+	// pretty sure we found the year
+	if len(nyear) == 2 {
+		yearIdx := yearRe.FindStringSubmatchIndex(fileName)
+		fileName = fileName[0:yearIdx[1]]
+	}
 
 	res := movieRe.FindStringSubmatch(fileName)
 

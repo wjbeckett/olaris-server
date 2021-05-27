@@ -6,6 +6,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/jinzhu/gorm"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	"gitlab.com/olaris/olaris-server/helpers"
 	"gitlab.com/olaris/olaris-server/metadata/agents"
 	"gitlab.com/olaris/olaris-server/metadata/db"
@@ -23,21 +24,23 @@ type MetadataContext struct {
 	MetadataRetrievalAgent agents.MetadataRetrievalAgent
 	MetadataManager        *metadata.MetadataManager
 
+	// Currently unused
 	ExitChan chan bool
 }
 
 // Cleanup cleans up any running threads / processes for the context.
 func (m *MetadataContext) Cleanup() {
-	m.ExitChan <- true
+	// Currently unused
+	// m.ExitChan <- true
 	m.Db.Close()
-	log.Infoln("Closed all metadata context")
+	log.Infoln("closed all metadata context")
 }
 
 var env *MetadataContext
 
 // NewDefaultMDContext creates a new env with sane defaults.
 func NewDefaultMDContext() *MetadataContext {
-	dbDir := helpers.MetadataConfigPath()
+	dbDir := viper.GetString("sqliteDir")
 	helpers.EnsurePath(dbDir)
 
 	dbPath := path.Join(dbDir, "metadata.db")
@@ -69,7 +72,7 @@ func NewMDContext(
 
 	helpers.InitLoggers(log.InfoLevel)
 
-	log.Printf("Olaris Metadata Server - Version \"%s\"", helpers.Version)
+	log.Printf("olaris metadata server - version \"%s\"", helpers.Version)
 
 	database := db.NewDb(databaseOptions)
 	database.SetLogger(&GormLogger{})

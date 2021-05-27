@@ -2,8 +2,10 @@ package managers
 
 import (
 	"github.com/fsnotify/fsnotify"
-	"github.com/ncw/rclone/vfs"
+	"github.com/rclone/rclone/vfs"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	"gitlab.com/olaris/olaris-server/ffmpeg"
 	"gitlab.com/olaris/olaris-server/filesystem"
 	"gitlab.com/olaris/olaris-server/metadata/db"
@@ -71,6 +73,35 @@ func (man *LibraryManager) Shutdown() {
 	man.isShuttingDown = true
 	man.exitChan <- true
 	man.Pool.Shutdown()
+}
+
+// DeleteLibrary deletes the underlying Library object in the database and all associated files.
+// Shutdown() must be called before calling this function! After that, the LibraryManager object
+// must be discarded, it is no longer valid.
+func (man *LibraryManager) DeleteLibrary() error {
+	switch man.Library.Kind {
+	case db.MediaTypeMovie:
+		movieFiles, _ := db.FindMovieFilesInLibrary(man.Library.ID)
+		for _, movieFile := range movieFiles {
+			movieID := movieFile.MovieID
+			movieFile.DeleteWithStreams()
+			man.metadataManager.GarbageCollectMovieIfRequired(movieID)
+		}
+	case db.MediaTypeSeries:
+		episodeFiles, _ := db.FindEpisodeFilesInLibrary(man.Library.ID)
+		for _, episodeFile := range episodeFiles {
+			episodeID := episodeFile.EpisodeID
+			episodeFile.DeleteWithStreams()
+			man.metadataManager.GarbageCollectEpisodeIfRequired(episodeID)
+		}
+	default:
+		log.Error("Failed to delete library of kind", man.Library.Kind)
+	}
+
+	if err := db.DeleteLibraryByID(man.Library.ID); err != nil {
+		return errors.Wrap(err, "Failed to delete library")
+	}
+	return nil
 }
 
 // IdentifyUnidentifiedFiles looks for missing metadata information and attempts to retrieve it.
@@ -143,9 +174,21 @@ func (man *LibraryManager) checkAndAddProbeJob(node filesystem.Node) {
 	}
 }
 
-// RescanFilesystem goes over the filesystem and parses filenames in the given library.
-func (man *LibraryManager) RescanFilesystem() {
-	log.WithFields(man.Library.LogFields()).Println("Scanning library for changed files.")
+// RescanFilesystem goes over the filesystem and parses filenames in the given library. If a filePath is supplied it will only scan the given path for new content.
+func (man *LibraryManager) RescanFilesystem(filePath string) {
+	if filePath == "" {
+		filePath = man.Library.FilePath
+		log.Debugln("No filePath supplied, going to scan from the root")
+	} else {
+		if strings.Contains(filePath, man.Library.FilePath) {
+			log.WithFields(log.Fields{"filePath": filePath}).Debugln("Valid filepath supplied, scanning from giving path")
+		} else {
+			log.WithFields(log.Fields{"filePath": filePath, "libraryPath": man.Library.FilePath}).Debugln("Given filePath is not part of the library, ignoring.")
+			filePath = man.Library.FilePath
+		}
+	}
+
+	log.WithFields(man.Library.LogFields()).WithField("filePath", filePath).Println("Scanning library for changed files.")
 	stime := time.Now()
 
 	// TODO: Move this into db package
@@ -159,10 +202,10 @@ func (man *LibraryManager) RescanFilesystem() {
 	// TODO: Should this be in it's own healthCheck method on the library or something?
 	switch man.Library.Backend {
 	case db.BackendLocal:
-		rootNode, err = filesystem.LocalNodeFromPath(man.Library.FilePath)
+		rootNode, err = filesystem.LocalNodeFromPath(filePath)
 	case db.BackendRclone:
 		rootNode, err = filesystem.RcloneNodeFromPath(
-			path.Join(man.Library.RcloneName, man.Library.FilePath))
+			path.Join(man.Library.RcloneName, filePath))
 	}
 
 	if err != nil {
@@ -184,7 +227,7 @@ func (man *LibraryManager) RescanFilesystem() {
 	man.RecursiveProbe(rootNode)
 
 	dur := time.Since(stime)
-	log.Printf("Probing library '%s' took %f seconds", man.Library.FilePath, dur.Seconds())
+	log.Printf("Scanning library took %f seconds", dur.Seconds())
 	man.Library.RefreshCompletedAt = time.Now()
 	db.SaveLibrary(man.Library)
 
@@ -198,12 +241,20 @@ func (man *LibraryManager) RescanFilesystem() {
 // and probes any interesting files it finds along the way.
 func (man *LibraryManager) RecursiveProbe(rootNode filesystem.Node) {
 	log.WithField("path", rootNode.Path()).Debugf("RecursiveProbe called")
+
 	if !strings.Contains(rootNode.Path(), man.Library.FilePath) {
 		log.WithField("libraryRoot", man.Library.FilePath).
 			Warnf("refusing to scan outside of library root")
 		return
 	}
+
 	rootNode.Walk(func(walkPath string, n filesystem.Node, err error) error {
+		p := filepath.Base(n.Path())
+		if n.IsDir() && p[0] == '.' && viper.GetBool("metadata.scan_hidden") == false {
+			log.WithFields(log.Fields{"path": p, "fullPath": n.Path()}).Warnln("skipping hidden folder, if you want to index it please set metadata.scan_hidden to true.")
+			return filepath.SkipDir
+		}
+
 		if err != nil {
 			log.WithError(err).Warnf("received an error while walking %s", walkPath)
 		} else if ValidFile(n) {
@@ -234,17 +285,15 @@ func (man *LibraryManager) AddWatcher(filePath string) {
 // and tries to associate the file with metadata based on the filename.
 func (man *LibraryManager) ProbeFile(n filesystem.Node) error {
 	library := man.Library
-	log.WithFields(log.Fields{"filepath": n.Path()}).Println("Parsing filepath.")
+	st := time.Now()
+	log.WithFields(log.Fields{"filepath": n.Path()}).Println("scanning file")
 
 	basename := n.Name()
-
-	log.WithFields(log.Fields{"filePath": n.FileLocator().String()}).
-		Debugln("Reading stream information from file")
 
 	streams, err := ffmpeg.GetStreams(n.FileLocator())
 	if err != nil {
 		log.WithError(err).
-			Debugln("Received error while opening file for stream inspection")
+			Debugln("received error while opening file for stream inspection")
 		return nil
 	}
 
@@ -254,7 +303,7 @@ func (man *LibraryManager) ProbeFile(n filesystem.Node) error {
 	// but since we have to open and ffprobe the file, we do it in this async job instead.
 	if len(streams.VideoStreams) == 0 {
 		log.WithFields(log.Fields{"filePath": n.FileLocator().String()}).
-			Infoln("File doesn't have any video streams, not adding to library.")
+			Infoln("file doesn't have any video streams, not adding to library.")
 		return nil
 	}
 
@@ -275,7 +324,7 @@ func (man *LibraryManager) ProbeFile(n filesystem.Node) error {
 		_, err := man.metadataManager.GetOrCreateEpisodeForEpisodeFile(&episodeFile)
 		if err != nil {
 			log.WithError(err).WithField("episodeFile", episodeFile.FileName).
-				Warn("Failed to to identify and create episode for EpisodeFile")
+				Warn("failed to to identify and create episode for EpisodeFile")
 		}
 
 	case db.MediaTypeMovie:
@@ -293,10 +342,12 @@ func (man *LibraryManager) ProbeFile(n filesystem.Node) error {
 		_, err := man.metadataManager.GetOrCreateMovieForMovieFile(&movieFile)
 		if err != nil {
 			log.WithError(err).WithField("movieFile", movieFile.FileName).
-				Warn("Failed to to identify and create Movie for MovieFile")
+				Warn("failed to to identify and create Movie for MovieFile")
 		}
-
 	}
+
+	dur := time.Since(st)
+	log.WithFields(log.Fields{"duration": dur.Seconds(), "path": n.Path()}).Printf("done scanning file")
 	return nil
 }
 
@@ -372,13 +423,17 @@ func (man *LibraryManager) RemoveMissingFiles(locator filesystem.FileLocator) {
 
 	for _, movieFile := range db.FindMovieFilesInLibraryByLocator(man.Library.ID, locator) {
 		if FileMissing(movieFile) {
-			movieFile.DeleteSelfAndMD()
+			movieID := movieFile.MovieID
+			movieFile.DeleteWithStreams()
+			man.metadataManager.GarbageCollectMovieIfRequired(movieID)
 		}
 	}
 
 	for _, episodeFile := range db.FindEpisodeFilesInLibraryByLocator(man.Library.ID, locator) {
 		if FileMissing(episodeFile) {
-			episodeFile.DeleteSelfAndMD()
+			episodeID := episodeFile.EpisodeID
+			episodeFile.DeleteWithStreams()
+			man.metadataManager.GarbageCollectEpisodeIfRequired(episodeID)
 		}
 	}
 }
@@ -395,7 +450,7 @@ func (man *LibraryManager) RefreshAll() {
 		man.AddWatcher(man.Library.FilePath)
 	}
 
-	man.RescanFilesystem()
+	man.RescanFilesystem("")
 	man.IdentifyUnidentifiedFiles()
 }
 

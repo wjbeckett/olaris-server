@@ -1,8 +1,6 @@
 package db
 
 import (
-	"fmt"
-
 	"github.com/jinzhu/gorm"
 	uuid "github.com/satori/go.uuid"
 )
@@ -33,7 +31,6 @@ func (ud *UUIDable) SetUUID() error {
 	uuid, err := uuid.NewV4()
 
 	if err != nil {
-		fmt.Println("Could not generate unique UID", err)
 		return err
 	}
 	ud.UUID = uuid.String()
@@ -51,7 +48,6 @@ type MediaFile interface {
 	GetFileName() string
 	GetLibrary() *Library
 	GetStreams() []Stream
-	DeleteSelfAndMD()
 }
 
 // MediaItem is an embeddeable struct that holds information about filesystem files (episode or movies).

@@ -22,6 +22,12 @@ func (r *Resolver) UpdateMovieFileMetadata(
 	ctx context.Context,
 	args *struct{ Input UpdateMovieFileMetadataInput },
 ) *UpdateMovieFileMetadataPayloadResolver {
+
+	err := ifAdmin(ctx)
+	if err != nil {
+		return &UpdateMovieFileMetadataPayloadResolver{error: err}
+	}
+
 	movieFile, err := db.FindMovieFileByUUID(args.Input.MovieFileUUID)
 	if err != nil {
 		return &UpdateMovieFileMetadataPayloadResolver{error: err}
@@ -32,11 +38,6 @@ func (r *Resolver) UpdateMovieFileMetadata(
 	if err == nil && oldMovie.TmdbID == int(args.Input.TmdbID) {
 		return &UpdateMovieFileMetadataPayloadResolver{mediaItem: oldMovie}
 	}
-	// TODO(Leon Handreke): For consistency,
-	//  put this in a GarbageCollectMovie func in MetadataManager.
-	// If this is the only MovieFile associated with this movie,
-	// purge it afterwards.
-	shouldPurgeOldMovie := oldMovie != nil && len(oldMovie.MovieFiles) == 1
 
 	movie, err := r.env.MetadataManager.GetOrCreateMovieByTmdbID(int(args.Input.TmdbID))
 	if err != nil {
@@ -46,8 +47,8 @@ func (r *Resolver) UpdateMovieFileMetadata(
 	movieFile.Movie = *movie
 	db.SaveMovieFile(movieFile)
 
-	if shouldPurgeOldMovie {
-		db.DeleteMovieByID(oldMovie.ID)
+	if oldMovie != nil {
+		r.env.MetadataManager.GarbageCollectMovieIfRequired(oldMovie.ID)
 	}
 
 	return &UpdateMovieFileMetadataPayloadResolver{mediaItem: movie}
